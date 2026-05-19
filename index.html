@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="description" content="DON'T BLINK — Viral AI blink detection game. Keep your eyes open or lose instantly." />
+  <meta name="theme-color" content="#06060f" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="permissions-policy" content="camera=(self)" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%91%81%EF%B8%8F</text></svg>" />
+  <title>DON'T BLINK</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            neon: { pink: '#ff2d95', cyan: '#00f5ff', purple: '#b026ff', green: '#39ff14', red: '#ff1744' },
+            cyber: { dark: '#06060f', mid: '#0c0c1a', card: 'rgba(12,12,28,0.72)' }
+          },
+          fontFamily: {
+            display: ['Orbitron', 'system-ui', 'sans-serif'],
+            body: ['Rajdhani', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+</head>
+<body class="text-white font-body antialiased">
+
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <!-- Ambient layers -->
+  <div class="bg-mesh" aria-hidden="true"></div>
+  <canvas id="particles-canvas" class="fixed inset-0 z-0 pointer-events-none" aria-hidden="true"></canvas>
+  <div class="scanlines fixed inset-0 z-[1] pointer-events-none" aria-hidden="true"></div>
+
+  <!-- Premium loading screen -->
+  <div id="loading-screen" class="loading-screen" role="alert" aria-busy="true" aria-live="polite">
+    <div class="loading-inner">
+      <div class="loading-eye-ring">
+        <div class="loading-eye-core">👁</div>
+      </div>
+      <h2 class="loading-title font-display" data-i18n="loading">INITIALIZING</h2>
+      <p class="loading-sub" data-i18n="loadingSub">Calibrating neural eye tracker…</p>
+      <div class="loading-track">
+        <div id="loading-bar" class="loading-fill"></div>
+      </div>
+      <p class="loading-percent"><span id="loading-percent">0</span>%</p>
+    </div>
+  </div>
+
+  <!-- Red blink warning flash -->
+  <div id="blink-flash" class="blink-flash" aria-hidden="true"></div>
+
+  <!-- HTTPS required for camera on mobile -->
+  <div id="https-warning" class="https-banner hidden" role="alert">
+    <p data-i18n="httpsRequired">Camera requires HTTPS. Open this site via your Cloudflare URL, not a local file.</p>
+  </div>
+
+  <div id="app" class="app-shell">
+
+    <!-- Navbar -->
+    <header class="site-header">
+      <nav class="glass-nav" aria-label="Main navigation">
+        <div class="nav-brand">
+          <span class="brand-icon" aria-hidden="true">◉</span>
+          <span class="brand-text font-display">
+            <span class="text-gradient-pink">DON'T</span><span class="text-gradient-cyan">BLINK</span>
+          </span>
+        </div>
+        <div class="nav-actions">
+          <button id="lang-btn" class="icon-btn" type="button" aria-label="Switch language">
+            <span id="lang-label" class="lang-badge">KU</span>
+          </button>
+          <button id="sound-btn" class="icon-btn" type="button" aria-pressed="true" aria-label="Toggle sound">
+            <svg id="sound-icon-on" class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+            <svg id="sound-icon-off" class="icon-svg hidden" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.48-.73 2.5-2.25 2.5-4.02 0-.79-.19-1.53-.5-2.19l2.06 2.06V12c0-1.77-1.02-3.29-2.5-4.03V7.03l2.09 2.09V4L9.27 6.73 4.27 3z"/></svg>
+          </button>
+          <button id="fullscreen-btn" class="icon-btn" type="button" aria-label="Toggle fullscreen">
+            <svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <!-- Live HUD (visible during game) -->
+    <div id="game-hud" class="game-hud hidden" aria-live="polite">
+      <div class="hud-timer-block">
+        <span class="hud-label" data-i18n="survived">Survived</span>
+        <span id="hud-timer" class="hud-timer font-display">0.00</span>
+      </div>
+      <div class="hud-rank-block">
+        <span id="hud-rank" class="hud-rank">—</span>
+      </div>
+      <div class="hud-status">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span data-i18n="watching">AI is Watching</span>
+      </div>
+    </div>
+
+    <main id="main-content" class="main-content">
+
+      <!-- START SCREEN -->
+      <section id="start-screen" class="screen screen-start">
+        <div class="hero-card glass-card">
+          <p class="eyebrow" data-i18n="tagline">Viral AI Challenge</p>
+          <h1 class="hero-title font-display" data-i18n="keepOpen">Keep Your Eyes Open</h1>
+          <p class="hero-desc" data-i18n="instructions">Don't blink — not even once. The AI is tracking every frame.</p>
+
+          <div class="score-pill">
+            <span class="score-pill-icon" aria-hidden="true">◆</span>
+            <span data-i18n="bestScore">Best Score</span>
+            <strong id="best-score-display" class="font-display">0.00s</strong>
+          </div>
+
+          <button id="start-btn" class="btn-primary" type="button" data-i18n="startChallenge">
+            Start Challenge
+          </button>
+          <p class="fine-print" data-i18n="cameraNote">Camera Access Required</p>
+        </div>
+
+        <div class="leaderboard-card glass-card">
+          <div class="lb-header">
+            <h2 class="lb-title font-display" data-i18n="leaderboard">Leaderboard</h2>
+            <span class="lb-badge" data-i18n="localScores">Your Scores</span>
+          </div>
+          <ol id="leaderboard-list" class="lb-list" aria-label="Top scores"></ol>
+        </div>
+      </section>
+
+      <!-- GAME SCREEN -->
+      <section id="game-screen" class="screen screen-game hidden" aria-label="Game area">
+
+        <div class="cam-stage">
+          <!-- Circular webcam frame -->
+          <div id="video-container" class="cam-ring">
+            <div class="cam-ring-glow" aria-hidden="true"></div>
+            <div class="cam-inner">
+              <video id="webcam" class="cam-video mirror" playsinline webkit-playsinline muted autoplay aria-label="Webcam feed"></video>
+              <canvas id="face-canvas" class="cam-overlay mirror" aria-hidden="true"></canvas>
+              <div class="cam-vignette" aria-hidden="true"></div>
+
+              <!-- Countdown -->
+              <div id="countdown-overlay" class="countdown-layer">
+                <span id="countdown-number" class="countdown-num font-display">3</span>
+              </div>
+
+              <!-- No face warning -->
+              <div id="no-face-warning" class="no-face-warn hidden" role="status">
+                <span data-i18n="faceLost">Face not detected</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Side stats (desktop) -->
+          <div class="side-stats">
+            <div class="stat-chip">
+              <span class="stat-label">FPS</span>
+              <span id="fps-display" class="stat-value font-mono">—</span>
+            </div>
+            <div id="ear-debug" class="stat-chip stat-ear">
+              <span class="stat-label">EAR</span>
+              <span id="ear-value" class="stat-value font-mono">—</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="game-warning font-display" data-i18n="dontBlink">DO NOT BLINK</p>
+
+        <!-- Hidden legacy timer refs for sync -->
+        <span id="timer-display" class="sr-only">0.00</span>
+        <span id="rank-display" class="sr-only">—</span>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>DON'T BLINK <span aria-hidden="true">©</span> 2026 · <span data-i18n="madeWith">AI + Webcam</span></p>
+    </footer>
+  </div>
+
+  <!-- Cinematic fail overlay -->
+  <div id="fail-overlay" class="fail-cinematic hidden" role="alert" aria-live="assertive">
+    <div class="fail-glitch-wrap">
+      <h2 id="fail-text" class="fail-title font-display" data-i18n="youFailed">You Failed</h2>
+    </div>
+    <p id="fail-meme" class="fail-meme"></p>
+    <p class="fail-sub font-display" data-i18n="blinkDetected">Blink Detected</p>
+  </div>
+
+  <!-- Game over modal -->
+  <div id="game-over-modal" class="modal-root hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div id="modal-content" class="modal-panel glass-card">
+      <div class="modal-skull" aria-hidden="true">💀</div>
+      <h2 id="modal-title" class="modal-title font-display" data-i18n="blinkDetected">Blink Detected</h2>
+      <p id="modal-meme" class="modal-meme"></p>
+
+      <div class="modal-stats">
+        <div class="modal-stat">
+          <span class="modal-stat-label" data-i18n="yourTime">Your Time</span>
+          <span id="final-time" class="modal-stat-value font-display text-cyan">0.00s</span>
+        </div>
+        <div class="modal-stat">
+          <span class="modal-stat-label" data-i18n="bestScore">Best Score</span>
+          <span id="modal-best-score" class="modal-stat-value font-display text-green">0.00s</span>
+        </div>
+      </div>
+
+      <div id="modal-rank" class="rank-badge font-display"></div>
+
+      <div class="modal-actions">
+        <button id="share-btn" class="btn-secondary" type="button" data-i18n="shareResult">Share Result</button>
+        <button id="retry-btn" class="btn-primary" type="button" data-i18n="tryAgain">Try Again</button>
+      </div>
+      <p id="share-toast" class="share-toast hidden" role="status" data-i18n="copied">Copied to clipboard!</p>
+    </div>
+  </div>
+
+  <canvas id="confetti-canvas" class="fixed inset-0 z-30 pointer-events-none" aria-hidden="true"></canvas>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/particles.js"></script>
+  <script src="js/sounds.js"></script>
+  <script src="js/blink-detector.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
