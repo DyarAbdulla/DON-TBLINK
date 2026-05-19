@@ -423,11 +423,22 @@
   document.querySelector('[data-close-modal]')?.addEventListener('click', resetToStart);
 
   BlinkDetector.onBlinkCallback = handleBlink;
-  BlinkDetector.onFrameCallback = (ear, threshold, calibrated, hasFace) => {
+  BlinkDetector.onFrameCallback = (ear, threshold, calibrated, hasFace, mode) => {
     if (earValue) {
-      if (!hasFace) earValue.textContent = '—';
-      else if (!calibrated) earValue.textContent = i18n.t('calibrating');
-      else earValue.textContent = ear.toFixed(3);
+      if (!hasFace && ear === 0) {
+        earValue.textContent = '—';
+        earValue.classList.remove('ear-live', 'ear-blink');
+      } else if (!calibrated) {
+        earValue.textContent = Number(ear).toFixed(3);
+        earValue.classList.add('ear-live');
+        earValue.classList.remove('ear-blink');
+      } else {
+        const t = threshold != null ? threshold : BlinkDetector.lastThreshold;
+        earValue.textContent = `${Number(ear).toFixed(3)}`;
+        earValue.classList.add('ear-live');
+        earValue.classList.toggle('ear-blink', ear < t);
+        earValue.title = `EAR ${ear.toFixed(3)} / thresh ${t.toFixed(3)} [${mode || '?'}]`;
+      }
     }
     trackFPS();
   };

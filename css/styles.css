@@ -594,6 +594,19 @@ body {
 }
 .stat-value { font-size: 0.95rem; color: var(--green); }
 
+.ear-value-live.ear-live {
+  color: var(--cyan);
+  animation: ear-pulse 0.8s ease infinite;
+}
+.ear-value-live.ear-blink {
+  color: var(--red);
+  animation: none;
+}
+@keyframes ear-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
 .game-warning {
   text-align: center;
   font-size: 0.8rem;
