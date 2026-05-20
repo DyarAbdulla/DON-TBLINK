@@ -337,7 +337,7 @@ const BlinkDetector = (() => {
 
     faceMesh.setOptions({
       maxNumFaces: 1,
-      refineLandmarks: false,
+      refineLandmarks: true,
       minDetectionConfidence: 0.3,
       minTrackingConfidence: 0.3,
     });
@@ -500,26 +500,6 @@ const BlinkDetector = (() => {
     startFrameLoop();
   }
 
-  function stop() {
-    trackingActive = false;
-    blinkDetectionActive = false;
-    stopFrameLoop();
-
-    if (videoEl?.srcObject) {
-      videoEl.srcObject.getTracks().forEach((t) => t.stop());
-      videoEl.srcObject = null;
-    }
-
-    if (canvasCtx && canvasEl) {
-      canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-    }
-
-    faceDetected = false;
-    noFaceFrames = 0;
-    inferenceInFlight = false;
-    lastLandmarks = null;
-  }
-
   function resetCalibration() {
     calibCount = 0;
     calibSum = 0;
@@ -545,6 +525,44 @@ const BlinkDetector = (() => {
       }
       calibCount = CALIBRATION_FRAMES;
     }
+
+    if (!window.__earDebugInterval) {
+      window.__earDebugInterval = setInterval(() => {
+        if (!trackingActive) return;
+        console.log('[BlinkDetector]', {
+          ear: lastEar.toFixed(3),
+          threshold: lastThreshold.toFixed(3),
+          baseline: baselineEar.toFixed(3),
+          blinkActive: blinkDetectionActive,
+          face: faceDetected,
+        });
+      }, 500);
+    }
+  }
+
+  function stop() {
+    if (window.__earDebugInterval) {
+      clearInterval(window.__earDebugInterval);
+      window.__earDebugInterval = null;
+    }
+
+    trackingActive = false;
+    blinkDetectionActive = false;
+    stopFrameLoop();
+
+    if (videoEl?.srcObject) {
+      videoEl.srcObject.getTracks().forEach((t) => t.stop());
+      videoEl.srcObject = null;
+    }
+
+    if (canvasCtx && canvasEl) {
+      canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    }
+
+    faceDetected = false;
+    noFaceFrames = 0;
+    inferenceInFlight = false;
+    lastLandmarks = null;
   }
 
   return {
