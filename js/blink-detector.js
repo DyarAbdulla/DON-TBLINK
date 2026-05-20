@@ -1,11 +1,10 @@
 /**
  * blink-detector.js — MediaPipe FaceMesh + EAR + mobile pixel fallback
  *
- * Mobile fixes:
- * - rAF frame loop (no blocking Camera onFrame stack)
- * - Lower blink threshold (~0.20 absolute cap)
- * - Pixel-brightness fallback when MediaPipe stalls
- * - Console EAR log every 500ms
+ * Performance:
+ * - rAF visual loop (~60 FPS) with throttled MediaPipe inference on mobile
+ * - Cached landmark overlay between inference frames
+ * - Pixel-brightness fallback when WASM stalls (no overlay flicker)
  */
 
 const BlinkDetector = (() => {
@@ -15,10 +14,15 @@ const BlinkDetector = (() => {
   const CALIBRATION_FRAMES = 15;
   const BLINK_FRAMES_REQUIRED = 2;
 
-  // Desktop: relative drop from baseline | Mobile: also cap with absolute EAR
   const BASELINE_RATIO_DESKTOP = 0.72;
   const BASELINE_RATIO_MOBILE = 0.58;
   const MOBILE_ABSOLUTE_BLINK_EAR = 0.2;
+
+  const MOBILE_INFERENCE_SKIP = 3;
+  const DESKTOP_INFERENCE_SKIP = 1;
+  const MP_STALL_SOFT_MS = 180;
+  const MP_STALL_HARD_MS = 420;
+  const LANDMARK_PERSIST_MS = 600;
 
   let faceMesh = null;
   let rafId = null;
@@ -26,7 +30,6 @@ const BlinkDetector = (() => {
   let canvasEl = null;
   let canvasCtx = null;
 
-  // Offscreen canvas for pixel fallback
   let sampleCanvas = null;
   let sampleCtx = null;
 
@@ -43,7 +46,6 @@ const BlinkDetector = (() => {
   let blinkDetectionActive = false;
 
   let frameCounter = 0;
-  let mediapipeFrameCounter = 0;
   let noFaceFrames = 0;
   let faceDetected = false;
   let isMobile = false;
@@ -52,16 +54,21 @@ const BlinkDetector = (() => {
   let lastEar = 0;
   let lastThreshold = 0;
   let lastMediapipeAt = 0;
-  let frameInFlight = false;
+  let inferenceInFlight = false;
 
-  let debugLogInterval = null;
-  let lastDebugLog = 0;
+  let lastLandmarks = null;
+  let lastLandmarksAt = 0;
+  let lastMpEar = 0;
 
   function isMobileDevice() {
     return (
       /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
       (navigator.maxTouchPoints > 1 && window.innerWidth < 1024)
     );
+  }
+
+  function getInferenceSkip() {
+    return isMobile ? MOBILE_INFERENCE_SKIP : DESKTOP_INFERENCE_SKIP;
   }
 
   function dist(a, b) {
@@ -93,7 +100,6 @@ const BlinkDetector = (() => {
     return Math.max(thresh, 0.1);
   }
 
-  // ---- Pixel fallback: eye openness from luminance contrast ----
   function initSampleCanvas() {
     if (!sampleCanvas) {
       sampleCanvas = document.createElement('canvas');
@@ -139,13 +145,11 @@ const BlinkDetector = (() => {
       sampleCtx.drawImage(videoEl, 0, 0, sw, sh);
       const data = sampleCtx.getImageData(0, 0, sw, sh).data;
 
-      // Eye regions (selfie mirror: user's left = right side of image)
       const left = sampleRegionBrightness(sw * 0.52, sh * 0.32, sw * 0.78, sh * 0.48, data, sw);
       const right = sampleRegionBrightness(sw * 0.22, sh * 0.32, sw * 0.48, sh * 0.48, data, sw);
 
       const contrast = (left.contrast + right.contrast) / 2;
-      const earProxy = Math.min(0.45, contrast / 45);
-      return earProxy;
+      return Math.min(0.45, contrast / 45);
     } catch (e) {
       console.warn('[BlinkDetector] pixel fallback error:', e);
       return null;
@@ -153,7 +157,7 @@ const BlinkDetector = (() => {
   }
 
   function drawEyes(landmarks) {
-    if (!canvasCtx || !canvasEl) return;
+    if (!canvasCtx || !canvasEl || !landmarks) return;
     const w = canvasEl.width;
     const h = canvasEl.height;
     if (!w || !h) return;
@@ -179,20 +183,44 @@ const BlinkDetector = (() => {
     drawEye(RIGHT_EYE, '#ff2d95');
   }
 
+  function redrawCachedLandmarks() {
+    if (!lastLandmarks) return;
+    const age = performance.now() - lastLandmarksAt;
+    if (age > LANDMARK_PERSIST_MS) return;
+    drawEyes(lastLandmarks);
+  }
+
+  function mediapipeStallMs() {
+    const sinceMp = performance.now() - lastMediapipeAt;
+    if (lastMediapipeAt === 0) return sinceMp;
+    return sinceMp;
+  }
+
+  function isMediapipeHardStall() {
+    const since = mediapipeStallMs();
+    if (lastMediapipeAt === 0) return since > 280;
+    return since > MP_STALL_HARD_MS;
+  }
+
+  function isMediapipeSoftStall() {
+    if (lastMediapipeAt === 0) return false;
+    const since = mediapipeStallMs();
+    return since > MP_STALL_SOFT_MS && since <= MP_STALL_HARD_MS;
+  }
+
   function calibrate(ear) {
     if (calibCount < CALIBRATION_FRAMES) {
       calibCount++;
       calibSum += ear;
       if (calibCount === CALIBRATION_FRAMES) {
         baselineEar = calibSum / CALIBRATION_FRAMES;
-        console.log('[BlinkDetector] Calibrated baseline EAR:', baselineEar.toFixed(3));
       }
       return false;
     }
     return true;
   }
 
-  function checkBlink(ear) {
+  function checkBlink(ear, source) {
     const threshold = getBlinkThreshold();
     lastEar = ear;
     lastThreshold = threshold;
@@ -202,14 +230,13 @@ const BlinkDetector = (() => {
     }
 
     if (!blinkDetectionActive) {
-      if (onFrame) onFrame(ear, threshold, calibCount >= CALIBRATION_FRAMES, faceDetected, 'mp');
+      if (onFrame) onFrame(ear, threshold, calibCount >= CALIBRATION_FRAMES, faceDetected, source);
       return;
     }
 
     if (ear < threshold) {
       blinkFrameCount++;
       if (blinkFrameCount >= BLINK_FRAMES_REQUIRED && onBlink) {
-        console.log('[BlinkDetector] BLINK!', { ear: ear.toFixed(3), threshold: threshold.toFixed(3) });
         blinkDetectionActive = false;
         onBlink(ear);
       }
@@ -217,13 +244,12 @@ const BlinkDetector = (() => {
       blinkFrameCount = 0;
     }
 
-    if (onFrame) onFrame(ear, threshold, true, faceDetected, useFallbackOnly ? 'px' : 'mp');
+    if (onFrame) onFrame(ear, threshold, true, faceDetected, source);
   }
 
   function onResults(results) {
     if (!trackingActive) return;
 
-    mediapipeFrameCounter++;
     lastMediapipeAt = performance.now();
     useFallbackOnly = false;
 
@@ -233,7 +259,10 @@ const BlinkDetector = (() => {
       noFaceFrames++;
       faceDetected = false;
       if (noFaceFrames > 6 && onNoFace) onNoFace(true);
-      if (canvasCtx && canvasEl) canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      if (noFaceFrames > 12) {
+        lastLandmarks = null;
+        if (canvasCtx && canvasEl) canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      }
       return;
     }
 
@@ -243,6 +272,10 @@ const BlinkDetector = (() => {
 
     const landmarks = results.multiFaceLandmarks[0];
     const ear = getAverageEAR(landmarks);
+
+    lastLandmarks = landmarks;
+    lastLandmarksAt = performance.now();
+    lastMpEar = ear;
     drawEyes(landmarks);
 
     if (!calibrate(ear)) {
@@ -250,42 +283,44 @@ const BlinkDetector = (() => {
       return;
     }
 
-    checkBlink(ear);
+    checkBlink(ear, 'mp');
   }
 
-  function runFallbackFrame() {
+  /** Pixel EAR during WASM stall — keeps cached overlay, no canvas clear */
+  function runSeamlessFallback(mode) {
     const pxEar = pixelFallbackEAR();
-    if (pxEar == null) return;
-
-    useFallbackOnly = true;
-    faceDetected = true;
-    if (onNoFace) onNoFace(false);
-
-    if (!calibrate(pxEar)) {
-      if (onFrame) onFrame(pxEar, null, false, true, 'px');
+    if (pxEar == null) {
+      if (mode === 'hard' && lastMpEar > 0 && lastLandmarks) {
+        checkBlink(lastMpEar, 'mp-hold');
+      }
       return;
     }
 
-    checkBlink(pxEar);
+    const usePx = mode === 'hard' || !lastLandmarks;
+    useFallbackOnly = usePx;
+    faceDetected = true;
+    if (onNoFace) onNoFace(false);
+
+    redrawCachedLandmarks();
+
+    const ear = usePx ? pxEar : pxEar * 0.55 + lastMpEar * 0.45;
+
+    if (!calibrate(ear)) {
+      if (onFrame) onFrame(ear, null, false, true, usePx ? 'px' : 'blend');
+      return;
+    }
+
+    checkBlink(ear, usePx ? 'px' : 'blend');
   }
 
-  function debugLogTick() {
-    if (!trackingActive) return;
-    const now = performance.now();
-    if (now - lastDebugLog < 500) return;
-    lastDebugLog = now;
-
-    console.log('[BlinkDetector]', {
-      ear: lastEar.toFixed(3),
-      threshold: lastThreshold.toFixed(3),
-      baseline: baselineEar.toFixed(3),
-      calibrated: calibCount >= CALIBRATION_FRAMES,
-      blinkActive: blinkDetectionActive,
-      face: faceDetected,
-      mode: useFallbackOnly ? 'pixel-fallback' : 'mediapipe',
-      mpFrames: mediapipeFrameCounter,
-      mobile: isMobile,
-    });
+  function handleStallFallback() {
+    if (isMediapipeHardStall()) {
+      runSeamlessFallback('hard');
+      return;
+    }
+    if (isMediapipeSoftStall()) {
+      runSeamlessFallback('soft');
+    }
   }
 
   async function init() {
@@ -302,7 +337,7 @@ const BlinkDetector = (() => {
 
     faceMesh.setOptions({
       maxNumFaces: 1,
-      refineLandmarks: true,
+      refineLandmarks: false,
       minDetectionConfidence: 0.3,
       minTrackingConfidence: 0.3,
     });
@@ -313,7 +348,6 @@ const BlinkDetector = (() => {
       if (typeof faceMesh.initialize === 'function') {
         await faceMesh.initialize();
       }
-      console.log('[BlinkDetector] MediaPipe FaceMesh ready', { mobile: isMobile });
     } catch (e) {
       console.error('[BlinkDetector] MediaPipe init error (will use pixel fallback):', e);
     }
@@ -359,7 +393,22 @@ const BlinkDetector = (() => {
     }
   }
 
-  /** rAF loop — never blocks; runs fallback if MediaPipe silent > 400ms */
+  function scheduleInference() {
+    if (inferenceInFlight) return;
+
+    inferenceInFlight = true;
+    sendToMediaPipe()
+      .then((ok) => {
+        if (!ok || isMediapipeHardStall()) {
+          runSeamlessFallback('hard');
+        }
+      })
+      .finally(() => {
+        inferenceInFlight = false;
+      });
+  }
+
+  /** rAF visual loop (~60 FPS); MediaPipe throttled on mobile */
   function startFrameLoop() {
     const loop = () => {
       if (!trackingActive) return;
@@ -368,24 +417,14 @@ const BlinkDetector = (() => {
       if (document.hidden) return;
 
       frameCounter++;
-      debugLogTick();
+      redrawCachedLandmarks();
+      handleStallFallback();
 
-      if (frameInFlight) return;
-      frameInFlight = true;
+      const skip = getInferenceSkip();
+      if (frameCounter % skip !== 0) return;
+      if (inferenceInFlight) return;
 
-      (async () => {
-        try {
-          const mpOk = await sendToMediaPipe();
-          const sinceMp = performance.now() - lastMediapipeAt;
-          const mpStale = lastMediapipeAt === 0 ? sinceMp > 250 : sinceMp > 450;
-
-          if (!mpOk || mpStale) {
-            runFallbackFrame();
-          }
-        } finally {
-          frameInFlight = false;
-        }
-      })();
+      scheduleInference();
     };
 
     loop();
@@ -396,10 +435,27 @@ const BlinkDetector = (() => {
       cancelAnimationFrame(rafId);
       rafId = null;
     }
-    if (debugLogInterval) {
-      clearInterval(debugLogInterval);
-      debugLogInterval = null;
+  }
+
+  function getCameraConstraints() {
+    if (isMobile) {
+      return {
+        video: {
+          facingMode: 'user',
+          width: { ideal: 480, max: 640 },
+          height: { ideal: 360, max: 480 },
+        },
+        audio: false,
+      };
     }
+    return {
+      video: {
+        facingMode: 'user',
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+      audio: false,
+    };
   }
 
   async function start(video, canvas) {
@@ -419,13 +475,11 @@ const BlinkDetector = (() => {
     resetCalibration();
     isMobile = isMobileDevice();
     lastMediapipeAt = 0;
-    mediapipeFrameCounter = 0;
+    lastLandmarks = null;
+    lastLandmarksAt = 0;
+    lastMpEar = 0;
 
-    const constraints = isMobile
-      ? { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }
-      : { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false };
-
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia(getCameraConstraints());
 
     video.setAttribute('playsinline', 'true');
     video.setAttribute('webkit-playsinline', 'true');
@@ -442,13 +496,6 @@ const BlinkDetector = (() => {
 
     trackingActive = true;
     blinkDetectionActive = false;
-    lastDebugLog = 0;
-
-    console.log('[BlinkDetector] Camera started', {
-      mobile: isMobile,
-      video: `${videoEl.videoWidth}x${videoEl.videoHeight}`,
-      blinkThresholdCap: isMobile ? MOBILE_ABSOLUTE_BLINK_EAR : 'n/a',
-    });
 
     startFrameLoop();
   }
@@ -469,7 +516,8 @@ const BlinkDetector = (() => {
 
     faceDetected = false;
     noFaceFrames = 0;
-    frameInFlight = false;
+    inferenceInFlight = false;
+    lastLandmarks = null;
   }
 
   function resetCalibration() {
@@ -496,11 +544,7 @@ const BlinkDetector = (() => {
         baselineEar = calibSum / calibCount;
       }
       calibCount = CALIBRATION_FRAMES;
-      console.log('[BlinkDetector] Blink detection ON, baseline:', baselineEar.toFixed(3));
     }
-
-    const thresh = getBlinkThreshold();
-    console.log('[BlinkDetector] Blink threshold:', thresh.toFixed(3), isMobile ? '(mobile cap 0.20)' : '');
   }
 
   return {
